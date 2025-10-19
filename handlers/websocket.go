@@ -127,12 +127,12 @@ func (gs *GameServer) handleMessage(conn *websocket.Conn, msg *models.GameMessag
 // handleJoinQueue adds a player to the matchmaking queue
 func (gs *GameServer) handleJoinQueue(player *models.Player) {
 	gs.mutex.Lock()
-	defer gs.mutex.Unlock()
 
 	// Check if player is already in queue
 	for _, playerID := range gs.matchmaking {
 		if playerID == player.ID {
 			log.Printf("Player %s (%s) already in queue", player.Name, player.ID)
+			gs.mutex.Unlock()
 			return
 		}
 	}
@@ -144,7 +144,11 @@ func (gs *GameServer) handleJoinQueue(player *models.Player) {
 	// Try to match players
 	if len(gs.matchmaking) >= 2 {
 		log.Printf("Attempting to create match with %d players in queue", len(gs.matchmaking))
+		// Release the lock before calling createMatch to avoid deadlock
+		gs.mutex.Unlock()
 		gs.createMatch()
+	} else {
+		gs.mutex.Unlock()
 	}
 }
 
@@ -163,8 +167,11 @@ func (gs *GameServer) handleLeaveQueue(player *models.Player) {
 
 // createMatch creates a new game between two players
 func (gs *GameServer) createMatch() {
+	gs.mutex.Lock()
+
 	if len(gs.matchmaking) < 2 {
 		log.Printf("Not enough players in queue: %d", len(gs.matchmaking))
+		gs.mutex.Unlock()
 		return
 	}
 
@@ -178,6 +185,7 @@ func (gs *GameServer) createMatch() {
 
 	if !exists1 || !exists2 {
 		log.Printf("One or both players not found: player1=%v, player2=%v", exists1, exists2)
+		gs.mutex.Unlock()
 		return
 	}
 
@@ -191,6 +199,9 @@ func (gs *GameServer) createMatch() {
 
 	gs.games[newGame.ID] = newGame
 
+	// Release lock before sending messages to avoid deadlock
+	gs.mutex.Unlock()
+
 	log.Printf("Created game %s between %s (X) and %s (O)", newGame.ID, player1.Name, player2.Name)
 
 	// Notify both players
@@ -200,11 +211,10 @@ func (gs *GameServer) createMatch() {
 		GameID: newGame.ID,
 	}
 
-	log.Printf("Sending game found message to player1: %s", player1.Name)
+	// Notify both players
 	gs.sendToPlayer(player1.ID, gameFoundMsg)
 
 	gameFoundMsg.Data = gs.gameEngine.GetGameStateForPlayer(newGame, player2.ID)
-	log.Printf("Sending game found message to player2: %s", player2.Name)
 	gs.sendToPlayer(player2.ID, gameFoundMsg)
 }
 
@@ -277,12 +287,9 @@ func (gs *GameServer) sendToPlayer(playerID string, msg *models.GameMessage) {
 	gs.mutex.RLock()
 	defer gs.mutex.RUnlock()
 
-	log.Printf("Attempting to send %s message to player %s", msg.Type, playerID)
-
 	found := false
 	for conn, player := range gs.clients {
 		if player.ID == playerID {
-			log.Printf("Found player %s, sending message", playerID)
 			gs.sendToClient(conn, msg)
 			found = true
 			break
